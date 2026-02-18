@@ -235,17 +235,18 @@ class DataGenerator:
     
     def _get_distance(self, origin, destination):
         """Obtener distancia aproximada entre ciudades colombianas"""
+        # Se modificaron las distancias para dar mas realismo a las distancias segun los datos proporcionados por Google Maps
         distances = {
             ('Bogotá', 'Medellín'): 440,
-            ('Bogotá', 'Cali'): 460,
-            ('Bogotá', 'Barranquilla'): 1000,
-            ('Bogotá', 'Cartagena'): 1050,
-            ('Medellín', 'Cali'): 420,
-            ('Medellín', 'Barranquilla'): 640,
-            ('Medellín', 'Cartagena'): 640,
-            ('Cali', 'Barranquilla'): 1100,
-            ('Cali', 'Cartagena'): 1100,
-            ('Barranquilla', 'Cartagena'): 120
+            ('Bogotá', 'Cali'): 770, 
+            ('Bogotá', 'Barranquilla'): 591,
+            ('Bogotá', 'Cartagena'): 620,
+            ('Medellín', 'Cali'): 435,
+            ('Medellín', 'Barranquilla'): 752,
+            ('Medellín', 'Cartagena'): 700,
+            ('Cali', 'Barranquilla'): 1185, 
+            ('Cali', 'Cartagena'): 1133, 
+            ('Barranquilla', 'Cartagena'): 134
         }
         
         key = tuple(sorted([origin, destination]))
@@ -381,19 +382,34 @@ class DataGenerator:
                 tracking_number = f"FL{datetime.now().year}{str(delivery_counter+1).zfill(8)}"
                 customer_name = fake.name()
                 delivery_address = f"{fake.street_address()}, {city}"
-                
+                # Se cambio para parsear a float nativo de python.
                 package_weight = float(weights[i])
                 
+                # Horario programado y real - CORREGIDO
                 scheduled = departure + timedelta(hours=time_per_delivery * (i + 0.5))
-                
+
+                # Validar que scheduled sea después de la salida
+                if scheduled < departure:
+                    scheduled = departure + timedelta(minutes=30)  # Mínimo 30 min después
+
                 if arrival:
+                    # 90% entregados a tiempo (0-30 min después), 10% con retraso
                     if random.random() < 0.9:
-                        delivered = scheduled + timedelta(minutes=random.randint(-30, 30))
+                        # NUNCA antes de programada, siempre entre 0 y 30 minutos después
+                        delivered = scheduled + timedelta(minutes=random.randint(0, 30))
                     else:
                         delivered = scheduled + timedelta(minutes=random.randint(60, 180))
                     
+                    # VALIDACIÓN CRÍTICA: No puede ser después de la llegada
+                    if delivered > arrival:
+                        delivered = arrival - timedelta(minutes=5)  # 5 minutos antes de llegar
+                    
+                    # VALIDACIÓN CRÍTICA: No puede ser antes de la salida
+                    if delivered < departure:
+                        delivered = departure + timedelta(minutes=30)  # 30 min después de salir
+                    
                     delivery_status = 'delivered'
-                    signature = random.random() < 0.95
+                    signature = random.random() < 0.95  # 95% con firma
                 else:
                     delivered = None
                     delivery_status = 'pending'
