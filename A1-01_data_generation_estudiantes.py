@@ -2,7 +2,6 @@
 FleetLogix - Generación de Datos Sintéticos
 Genera 505000+ registros respetando relaciones y reglas de negocio
 """
-
 import psycopg2
 from psycopg2.extras import execute_batch
 import pandas as pd
@@ -13,6 +12,8 @@ import random
 import logging
 from tqdm import tqdm
 import json
+import os
+from dotenv import load_dotenv
 
 # Configuración de logging
 logging.basicConfig(
@@ -25,12 +26,13 @@ logging.basicConfig(
 )
 
 # Configuración de conexión
+load_dotenv()
 DB_CONFIG = {
-    'host': 'localhost',
-    'database': 'fleetlogix',
-    'user': 'postgres',
-    'password': 'YourStrong!Passw0rd',  # Cambiar por tu contraseña
-    'port': 5432
+    'host': os.getenv('DB_HOST'),
+    'database': os.getenv('DB_NAME'),
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD'),
+    'port': os.getenv('DB_PORT')
 }
 
 # Inicializar Faker con semilla para reproducibilidad
@@ -105,7 +107,14 @@ class DataGenerator:
         
         # Insertar en batch
         query = """
-            #TO DO#
+            INSERT INTO vehicles (
+                license_plate, 
+                vehicle_type, 
+                capacity_kg, 
+                fuel_type, 
+                acquisition_date, 
+                status
+            ) VALUES (%s, %s, %s, %s, %s, %s)
         """
         
         execute_batch(self.cursor, query, vehicles, page_size=100)
@@ -336,20 +345,23 @@ class DataGenerator:
         probs[8:12] = 0.08  # 8am-12pm pico mañana
         probs[14:18] = 0.07  # 2pm-6pm pico tarde
         return probs / probs.sum()
-    
+       
     def generate_deliveries(self, count=400000):
         """Generar 400000 entregas (promedio 4 por viaje)"""
         logging.info(f"Generando {count} entregas...")
         
         # Obtener todos los trips con su información
         self.cursor.execute("""
-            #TO DO#
+            SELECT t.trip_id, t.departure_datetime, t.arrival_datetime, 
+                t.total_weight_kg, r.destination_city
+            FROM trips t
+            JOIN routes r ON t.route_id = r.route_id
+            WHERE t.status = 'completed'
         """)
         trips_data = self.cursor.fetchall()
         
         deliveries = []
         delivery_counter = 0
-        
         # Distribuir entregas entre los viajes
         for trip_id, departure, arrival, total_weight, city in tqdm(trips_data, desc="Generando deliveries"):
             # Número de entregas para este viaje (2-6, promedio 4)
@@ -357,33 +369,31 @@ class DataGenerator:
             
             # Peso por entrega
             weights = self._distribute_weight(float(total_weight), num_deliveries)
-            #weights = self._distribute_weight(total_weight, num_deliveries)
             
             # Tiempo entre entregas
             if arrival:
                 delivery_duration = (arrival - departure).total_seconds() / 3600
                 time_per_delivery = delivery_duration / num_deliveries
             else:
-                time_per_delivery = 0.5  # 30 minutos promedio
+                time_per_delivery = 0.5
             
             for i in range(num_deliveries):
                 tracking_number = f"FL{datetime.now().year}{str(delivery_counter+1).zfill(8)}"
                 customer_name = fake.name()
                 delivery_address = f"{fake.street_address()}, {city}"
-                package_weight = weights[i]
                 
-                # Horario programado y real
+                package_weight = float(weights[i])
+                
                 scheduled = departure + timedelta(hours=time_per_delivery * (i + 0.5))
                 
                 if arrival:
-                    # 90% entregados a tiempo, 10% con retraso
                     if random.random() < 0.9:
                         delivered = scheduled + timedelta(minutes=random.randint(-30, 30))
                     else:
                         delivered = scheduled + timedelta(minutes=random.randint(60, 180))
                     
                     delivery_status = 'delivered'
-                    signature = random.random() < 0.95  # 95% con firma
+                    signature = random.random() < 0.95
                 else:
                     delivered = None
                     delivery_status = 'pending'
@@ -394,7 +404,7 @@ class DataGenerator:
                     tracking_number,
                     customer_name,
                     delivery_address,
-                    round(package_weight, 2),
+                    package_weight,  # Ya es float nativo
                     scheduled,
                     delivered,
                     delivery_status,
@@ -402,7 +412,6 @@ class DataGenerator:
                 ))
                 
                 delivery_counter += 1
-                
                 if delivery_counter > count:
                     break
             
@@ -412,8 +421,8 @@ class DataGenerator:
         # Insertar en batches
         query = """
             INSERT INTO deliveries (trip_id, tracking_number, customer_name,
-                                  delivery_address, package_weight_kg, scheduled_datetime,
-                                  delivered_datetime, delivery_status, recipient_signature)
+                                delivery_address, package_weight_kg, scheduled_datetime,
+                                delivered_datetime, delivery_status, recipient_signature)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         
@@ -445,7 +454,16 @@ class DataGenerator:
         
         # Obtener información de vehículos y sus viajes
         self.cursor.execute("""
-            #TO DO#
+            SELECT 
+                v.vehicle_id,
+                v.vehicle_type,
+                COUNT(t.trip_id) as trip_count,
+                MIN(t.departure_datetime) as first_trip,
+                MAX(t.departure_datetime) as last_trip
+            FROM vehicles v
+            LEFT JOIN trips t ON v.vehicle_id = t.vehicle_id
+            GROUP BY v.vehicle_id, v.vehicle_type
+            ORDER BY v.vehicle_id
         """)
         vehicle_stats = self.cursor.fetchall()
         

@@ -2,7 +2,8 @@
 -- FLEETLOGIX DATABASE SETUP
 -- Sistema de Gestión de Transporte y Logística
 -- =====================================================
-
+create database fleetlogix
+SET SCHEMA 'fleetlogix';
 -- 1. Crear las tablas del modelo relacional
 
 -- Tabla 1: vehicles (vehículos de la flota)
