@@ -30,7 +30,7 @@ logging.basicConfig(
 # Configuración de conexiones
 
 load_dotenv()
-DB_CONFIG = {
+POSTGRES_CONFIG = {
     'host': os.getenv('DB_HOST'),
     'database': os.getenv('DB_NAME'),
     'user': os.getenv('DB_USER'),
@@ -80,7 +80,54 @@ class FleetLogixETL:
         logging.info(" Iniciando extracción de datos...")
         
         query = """
-        #TO DO#
+        SELECT 
+            -- Información de entregas
+            d.delivery_id,
+            d.trip_id,
+            d.tracking_number,
+            d.customer_name,
+            d.delivery_address,
+            d.package_weight_kg,
+            d.scheduled_datetime,
+            d.delivered_datetime,
+            d.delivery_status,
+            d.recipient_signature,
+            
+            -- Información del viaje
+            t.vehicle_id,
+            t.driver_id,
+            t.route_id,
+            t.departure_datetime,
+            t.arrival_datetime,
+            t.fuel_consumed_liters,
+            
+            -- Información de la ruta
+            r.origin_city,
+            r.destination_city,
+            r.distance_km,
+            r.toll_cost,
+            
+            -- Información del conductor (para experiencia)
+            dr.license_expiry,
+            dr.hire_date,
+            
+            -- Información del vehículo (para edad)
+            v.acquisition_date,
+            v.vehicle_type,
+            v.capacity_kg,
+            v.fuel_type
+
+        FROM deliveries d
+        JOIN trips t ON d.trip_id = t.trip_id
+        JOIN routes r ON t.route_id = r.route_id
+        JOIN drivers dr ON t.driver_id = dr.driver_id
+        JOIN vehicles v ON t.vehicle_id = v.vehicle_id
+
+        WHERE d.scheduled_datetime >= CURRENT_DATE - INTERVAL '1 day'
+        AND d.scheduled_datetime < CURRENT_DATE
+        AND d.delivery_status IN ('delivered', 'pending')
+
+        ORDER BY d.scheduled_datetime;
         """
         
         try:
@@ -305,12 +352,114 @@ class FleetLogixETL:
         try:
             # Crear tabla de totales si no existe
             cursor.execute("""
-                #TO DO#
+                CREATE OR REPLACE TABLE daily_summary (
+                    summary_date DATE,
+                    batch_id INT,
+                    
+                    -- Totales generales
+                    total_deliveries INT,
+                    total_delivered INT,
+                    total_pending INT,
+                    total_weight_kg DECIMAL(12,2),
+                    total_revenue DECIMAL(12,2),
+                    total_fuel_consumed DECIMAL(12,2),
+                    
+                    -- Métricas de eficiencia
+                    avg_delivery_time_minutes DECIMAL(6,2),
+                    avg_delay_minutes DECIMAL(6,2),
+                    on_time_percentage DECIMAL(5,2),
+                    damaged_percentage DECIMAL(5,2),
+                    
+                    -- Por vehículo
+                    avg_vehicles_used INT,
+                    deliveries_per_vehicle DECIMAL(6,2),
+                    
+                    -- Por conductor
+                    avg_deliveries_per_driver DECIMAL(6,2),
+                    top_driver_id INT,
+                    top_driver_deliveries INT,
+                    
+                    -- Por ruta
+                    busiest_route_id INT,
+                    busiest_route_deliveries INT,
+                    
+                    -- Clientes
+                    unique_customers INT,
+                    repeat_customers INT,
+                    
+                    etl_timestamp TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+                );
             """)
             
             # Insertar totales del día
             cursor.execute("""
-                #TO DO#
+                INSERT INTO daily_summary (
+                    summary_date, batch_id,
+                    total_deliveries, total_delivered, total_pending,
+                    total_weight_kg, total_revenue, total_fuel_consumed,
+                    avg_delivery_time_minutes, avg_delay_minutes,
+                    on_time_percentage, damaged_percentage,
+                    avg_vehicles_used, deliveries_per_vehicle,
+                    avg_deliveries_per_driver,
+                    top_driver_id, top_driver_deliveries,
+                    busiest_route_id, busiest_route_deliveries,
+                    unique_customers, repeat_customers
+                )
+                SELECT
+                    CURRENT_DATE() - 1 AS summary_date,
+                    %s AS batch_id,
+                    
+                    -- Totales generales
+                    COUNT(*) AS total_deliveries,
+                    SUM(CASE WHEN delivery_status = 'delivered' THEN 1 ELSE 0 END) AS total_delivered,
+                    SUM(CASE WHEN delivery_status = 'pending' THEN 1 ELSE 0 END) AS total_pending,
+                    SUM(package_weight_kg) AS total_weight_kg,
+                    SUM(revenue_per_delivery) AS total_revenue,
+                    SUM(fuel_consumed_liters) AS total_fuel_consumed,
+                    
+                    -- Métricas de eficiencia
+                    AVG(delivery_time_minutes) AS avg_delivery_time_minutes,
+                    AVG(delay_minutes) AS avg_delay_minutes,
+                    AVG(CASE WHEN is_on_time THEN 100 ELSE 0 END) AS on_time_percentage,
+                    AVG(CASE WHEN is_damaged THEN 100 ELSE 0 END) AS damaged_percentage,
+                    
+                    -- Por vehículo
+                    COUNT(DISTINCT vehicle_key) AS avg_vehicles_used,
+                    COUNT(*) * 1.0 / NULLIF(COUNT(DISTINCT vehicle_key), 0) AS deliveries_per_vehicle,
+                    
+                    -- Por conductor
+                    COUNT(*) * 1.0 / NULLIF(COUNT(DISTINCT driver_key), 0) AS avg_deliveries_per_driver,
+                    
+                    -- Top driver
+                    (SELECT driver_key FROM fact_deliveries 
+                    WHERE date_key = (SELECT MAX(date_key) FROM dim_date WHERE full_date = CURRENT_DATE() - 1)
+                    GROUP BY driver_key ORDER BY COUNT(*) DESC LIMIT 1) AS top_driver_id,
+                    
+                    (SELECT MAX(delivery_count) FROM (
+                        SELECT COUNT(*) AS delivery_count 
+                        FROM fact_deliveries 
+                        WHERE date_key = (SELECT MAX(date_key) FROM dim_date WHERE full_date = CURRENT_DATE() - 1)
+                        GROUP BY driver_key
+                    )) AS top_driver_deliveries,
+                    
+                    -- Por ruta
+                    (SELECT route_key FROM fact_deliveries 
+                    WHERE date_key = (SELECT MAX(date_key) FROM dim_date WHERE full_date = CURRENT_DATE() - 1)
+                    GROUP BY route_key ORDER BY COUNT(*) DESC LIMIT 1) AS busiest_route_id,
+                    
+                    (SELECT MAX(route_count) FROM (
+                        SELECT COUNT(*) AS route_count 
+                        FROM fact_deliveries 
+                        WHERE date_key = (SELECT MAX(date_key) FROM dim_date WHERE full_date = CURRENT_DATE() - 1)
+                        GROUP BY route_key
+                    )) AS busiest_route_deliveries,
+                    
+                    -- Clientes
+                    COUNT(DISTINCT customer_key) AS unique_customers,
+                    COUNT(DISTINCT CASE WHEN total_deliveries > 1 THEN customer_key END) AS repeat_customers
+
+                FROM fact_deliveries
+                WHERE date_key = (SELECT MAX(date_key) FROM dim_date WHERE full_date = CURRENT_DATE() - 1)
             """, (self.batch_id,))
             
             self.sf_conn.commit()
