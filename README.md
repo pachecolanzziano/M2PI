@@ -176,7 +176,7 @@ openssl pkcs8 -topk8 -inform PEM -outform DER -in snowflake_key.pem -out snowfla
 Verificar que se creó
 ls -la snowflake_key.der
 
--- sql 
+-- sql - Actualizar Snowflake con la llave pública
 ALTER USER LUISPACHECO90 SET RSA_PUBLIC_KEY='MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApeoWJfLFJlUftKTSmYlh
 RU/0nKwagGDv1pac2dH70tPQmQQPuTv/mYDY5Y7drxHQkwcln/QCyab/I1eloZiU
 H0fcfecvfPlCM29A3IjF1RbDjb/BeljsufB8s5bhJpiYX1BfJCm52trKjuCKSwYo
@@ -184,3 +184,28 @@ H0fcfecvfPlCM29A3IjF1RbDjb/BeljsufB8s5bhJpiYX1BfJCm52trKjuCKSwYo
 J7Zmc9Cv69NkNqhzALVXPVnx4ju5A4U6mfTSHSFYWcN9EKKUzEfeqeLcL39fkDAV
 S7oh30KUuhlTInMaAAdwhWgSZpFJlxXodVsy5261gV/cAXM/g6xVBef/LTTZHA9t
 QwIDAQAB';
+
+
+customers = df[['customer_name']].drop_duplicates()
+            for _, row in customers.iterrows():
+                cursor.execute("""
+                    MERGE INTO dim_customer c
+                    USING (SELECT %s as customer_name) s
+                    ON c.customer_name = s.customer_name
+                    WHEN NOT MATCHED THEN
+                        INSERT (customer_name, customer_type, city, first_delivery_date, 
+                               total_deliveries, customer_category)
+                        VALUES (%s, 'Individual', %s, CURRENT_DATE(), 0, 'Regular')
+                """, (row['customer_name'], row['customer_name'], 
+                     df[df['customer_name'] == row['customer_name']]['destination_city'].iloc[0]))
+            
+            # Actualizar dimensiones SCD Type 2 si hay cambios
+            # (Ejemplo simplificado para dim_driver)
+            cursor.execute("""
+                UPDATE dim_driver 
+                SET valid_to = CURRENT_DATE() - 1, is_current = FALSE
+                WHERE driver_id IN (
+                    SELECT DISTINCT driver_id 
+                    FROM staging_daily_load
+                ) AND is_current = TRUE
+            """)
