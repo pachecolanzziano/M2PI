@@ -58,6 +58,10 @@ class FleetLogixETL:
             'records_loaded': 0,
             'errors': 0
         }
+        
+        with open('snowflake_key.der', 'rb') as key_file:
+            self.private_key = key_file.read()
+        
     
     def connect_databases(self):
         """Establecer conexiones con PostgreSQL y Snowflake"""
@@ -67,6 +71,8 @@ class FleetLogixETL:
             logging.info(" Conectado a PostgreSQL")
             
             # Snowflake
+            #agrego la llave
+            SNOWFLAKE_CONFIG['private_key'] = self.private_key
             self.sf_conn = snowflake.connector.connect(**SNOWFLAKE_CONFIG)
             logging.info(" Conectado a Snowflake")
             
@@ -123,7 +129,7 @@ class FleetLogixETL:
         JOIN drivers dr ON t.driver_id = dr.driver_id
         JOIN vehicles v ON t.vehicle_id = v.vehicle_id
 
-        WHERE d.scheduled_datetime >= CURRENT_DATE - INTERVAL '1 day'
+        WHERE d.scheduled_datetime >= CURRENT_DATE - INTERVAL '7 day'
         AND d.scheduled_datetime < CURRENT_DATE
         AND d.delivery_status IN ('delivered', 'pending')
 

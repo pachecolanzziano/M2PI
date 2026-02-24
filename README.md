@@ -150,3 +150,37 @@ WHERE
     AND t2.departure_datetime < t1.arrival_datetime;
 
 --
+
+
+
+-- generar la llave 
+openssl genrsa -out snowflake_key 2048
+-- escribirla 
+openssl rsa -in snowflake_key -pubout -out snowflake_key.pub
+
+-- verla la llave
+cat snowflake_key.pub
+
+
+
+librería que guarda tokens de autenticación de forma segura
+pip install snowflake-connector-python[secure-local-storage]
+
+--Generar nueva llave en formato PEM - git bash
+openssl genrsa -out snowflake_key.pem 2048
+openssl rsa -in snowflake_key.pem -pubout -out snowflake_key.pub
+
+--Convertir la llave PEM a DER 
+openssl pkcs8 -topk8 -inform PEM -outform DER -in snowflake_key.pem -out snowflake_key.der -nocrypt
+
+Verificar que se creó
+ls -la snowflake_key.der
+
+-- sql 
+ALTER USER LUISPACHECO90 SET RSA_PUBLIC_KEY='MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApeoWJfLFJlUftKTSmYlh
+RU/0nKwagGDv1pac2dH70tPQmQQPuTv/mYDY5Y7drxHQkwcln/QCyab/I1eloZiU
+H0fcfecvfPlCM29A3IjF1RbDjb/BeljsufB8s5bhJpiYX1BfJCm52trKjuCKSwYo
+7DsZAXLrnIBs3xsDyEyZ98h+i5Lz7n8gqaGM3XczLTTT/u/3dTAlHHAtgQh2+phU
+J7Zmc9Cv69NkNqhzALVXPVnx4ju5A4U6mfTSHSFYWcN9EKKUzEfeqeLcL39fkDAV
+S7oh30KUuhlTInMaAAdwhWgSZpFJlxXodVsy5261gV/cAXM/g6xVBef/LTTZHA9t
+QwIDAQAB';
