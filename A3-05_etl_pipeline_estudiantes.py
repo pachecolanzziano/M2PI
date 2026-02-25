@@ -14,6 +14,8 @@ import schedule
 import time
 import json
 from typing import Dict, List, Tuple
+import os
+from dotenv import load_dotenv
 
 # Configuración de logging
 logging.basicConfig(
@@ -26,21 +28,22 @@ logging.basicConfig(
 )
 
 # Configuración de conexiones
+load_dotenv()
 POSTGRES_CONFIG = {
-    'host': 'localhost',
-    'database': 'fleetlogix',
-    'user': 'postgres',
-    'password': 'your_password',
-    'port': 5432
+    'host': os.getenv('DB_HOST'),
+    'database': os.getenv('DB_NAME'),
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD'),
+    'port': os.getenv('DB_PORT')
 }
 
 SNOWFLAKE_CONFIG = {
-    'user': 'LUISPACHECO90',
-    'password': 'your_password',
-    'account': 'your_account',
-    'warehouse': 'FLEETLOGIX_WH',
-    'database': 'FLEETLOGIX_DW',
-    'schema': 'ANALYTICS'
+    'user': os.getenv('SNOWFLAKE_USER'),
+    'password': os.getenv('SNOWFLAKE_PASSWORD'),
+    'account': os.getenv('SNOWFLAKE_ACCOUNT'),
+    'warehouse': os.getenv('SNOWFLAKE_WAREHOUSE'),
+    'database': os.getenv('SNOWFLAKE_DATABASE'),
+    'schema': os.getenv('SNOWFLAKE_SCHEMA')
 }
 
 class FleetLogixETL:
@@ -54,6 +57,15 @@ class FleetLogixETL:
             'records_loaded': 0,
             'errors': 0
         }
+        
+        # Cargar llave privada en formato DER
+        try:
+            with open('snowflake_key.der', 'rb') as key_file:
+                self.private_key = key_file.read()
+            logging.info(" Llave privada cargada correctamente")
+        except FileNotFoundError:
+            logging.error(" Archivo snowflake_key.der no encontrado")
+            self.private_key = None
     
     def connect_databases(self):
         """Establecer conexiones con PostgreSQL y Snowflake"""
@@ -63,6 +75,7 @@ class FleetLogixETL:
             logging.info(" Conectado a PostgreSQL")
             
             # Snowflake
+            SNOWFLAKE_CONFIG['private_key'] = self.private_key
             self.sf_conn = snowflake.connector.connect(**SNOWFLAKE_CONFIG)
             logging.info(" Conectado a Snowflake")
             
