@@ -219,45 +219,55 @@ class FleetLogixETL:
             return pd.DataFrame()
     
     def load_dimensions(self, df: pd.DataFrame):
-        """Cargar o actualizar dimensiones en Snowflake"""
+        """Cargar dimensiones - VERSIÓN SNOWFLAKE"""
         logging.info(" Cargando dimensiones...")
         
-        cursor = self.sf_conn.cursor()
+        cursor = self.sf_conn.cursor()  # ← Cursor de Snowflake
         
         try:
-            # Cargar dim_customer (nuevos clientes)
+            # ============================================
+            # CLIENTES - Insertar de a uno (son ~400)
+            # ============================================
             customers = df[['customer_name', 'destination_city']].drop_duplicates()
-
-            # Crear tabla temporal
-            cursor.execute("""
-                CREATE OR REPLACE TEMPORARY TABLE temp_customers (
-                    customer_name VARCHAR(200),
-                    city VARCHAR(100)
-                )
-            """)
-
-            # Insertar TODOS los clientes de UNA VEZ
-            from psycopg2.extras import execute_batch
-            temp_data = [(row['customer_name'], row['destination_city']) for _, row in customers.iterrows()]
-
-            execute_batch(cursor, """
-                INSERT INTO temp_customers (customer_name, city)
-                VALUES (%s, %s)
-            """, temp_data, page_size=1000)
-
-            # Hacer UN SOLO MERGE para TODOS los clientes
-            cursor.execute("""
-                MERGE INTO dim_customer c
-                USING temp_customers t
-                ON c.customer_name = t.customer_name
-                WHEN NOT MATCHED THEN
-                    INSERT (customer_name, customer_type, city, first_delivery_date, 
-                        total_deliveries, customer_category)
-                    VALUES (t.customer_name, 'Individual', t.city, CURRENT_DATE(), 0, 'Regular')
-            """)
+            clientes_nuevos = 0
+            
+            for _, row in customers.iterrows():
+                # Primero verificar si existe
+                cursor.execute("""
+                    SELECT customer_key FROM DIM_CUSTOMER 
+                    WHERE customer_name = %s
+                """, (row['customer_name'],))
+                
+                existing = cursor.fetchone()
+                
+                if not existing:
+                    # Generar nuevo customer_key (max + 1)
+                    cursor.execute("SELECT COALESCE(MAX(customer_key), 0) + 1 FROM DIM_CUSTOMER")
+                    new_key = cursor.fetchone()[0]
+                    
+                    cursor.execute("""
+                        INSERT INTO DIM_CUSTOMER (
+                            customer_key, customer_name, customer_type, 
+                            city, first_delivery_date, total_deliveries, customer_category
+                        ) VALUES (%s, %s, 'Individual', %s, CURRENT_DATE(), 0, 'Regular')
+                    """, (new_key, row['customer_name'], row['destination_city']))
+                    clientes_nuevos += 1
+            
+            # ============================================
+            # DRIVERS - Actualizar SCD Type 2
+            # ============================================
+            active_drivers = df[['driver_id']].drop_duplicates()
+            
+            for _, row in active_drivers.iterrows():
+                cursor.execute("""
+                    UPDATE DIM_DRIVER 
+                    SET valid_to = CURRENT_DATE() - 1, is_current = FALSE
+                    WHERE driver_id = %s
+                    AND is_current = TRUE
+                """, (row['driver_id'],))
             
             self.sf_conn.commit()
-            logging.info(" Dimensiones actualizadas")
+            logging.info(f" Dimensiones actualizadas - {clientes_nuevos} clientes nuevos, {len(active_drivers)} conductores activos")
             
         except Exception as e:
             logging.error(f" Error cargando dimensiones: {e}")
@@ -265,75 +275,59 @@ class FleetLogixETL:
             self.metrics['errors'] += 1
     
     def load_facts(self, df: pd.DataFrame):
-        """Cargar hechos en Snowflake"""
+        """Cargar hechos en Snowflake - VERSIÓN CORREGIDA"""
         logging.info(" Cargando tabla de hechos...")
         
-        cursor = self.sf_conn.cursor()
+        cursor = self.sf_conn.cursor()  # ← Cursor de Snowflake
         
         try:
-            # Preparar datos para inserción
+            # Preparar datos
             fact_data = []
             for _, row in df.iterrows():
-                # Obtener keys de dimensiones
                 date_key = int(pd.to_datetime(row['scheduled_datetime']).strftime('%Y%m%d'))
                 scheduled_time_key = pd.to_datetime(row['scheduled_datetime']).hour * 100
                 delivered_time_key = pd.to_datetime(row['delivered_datetime']).hour * 100
                 
                 fact_data.append((
-                    date_key,
-                    scheduled_time_key,
-                    delivered_time_key,
-                    row['vehicle_id'],  # Simplificado, debería buscar vehicle_key
-                    row['driver_id'],   # Simplificado, debería buscar driver_key
-                    row['route_id'],    # Simplificado, debería buscar route_key
-                    1,  # customer_key placeholder
-                    row['delivery_id'],
-                    row['trip_id'],
-                    row['tracking_number'],
-                    row['package_weight_kg'],
-                    row['distance_km'],
-                    row['fuel_consumed_liters'],
-                    row['delivery_time_minutes'],
-                    row['delay_minutes'],
-                    row['deliveries_per_hour'],
-                    row['fuel_efficiency_km_per_liter'],
-                    row['cost_per_delivery'],
-                    row['revenue_per_delivery'],
-                    row['is_on_time'],
-                    False,  # is_damaged
-                    row['recipient_signature'],
-                    row['delivery_status'],
+                    date_key, scheduled_time_key, delivered_time_key,
+                    row['vehicle_id'], row['driver_id'], row['route_id'], 1,
+                    row['delivery_id'], row['trip_id'], row['tracking_number'],
+                    row['package_weight_kg'], row['distance_km'], row['fuel_consumed_liters'],
+                    row['delivery_time_minutes'], row['delay_minutes'], row['deliveries_per_hour'],
+                    row['fuel_efficiency_km_per_liter'], row['cost_per_delivery'], row['revenue_per_delivery'],
+                    row['is_on_time'], False, row['recipient_signature'], row['delivery_status'],
                     self.batch_id
                 ))
             
-                # ============================================
-                # NUEVO: Inserción por lotes de 5000 registros
-                # ============================================
-                BATCH_SIZE = 5000
-                total_batches = (len(fact_data) + BATCH_SIZE - 1) // BATCH_SIZE
-
-                for i in range(0, len(fact_data), BATCH_SIZE):
-                    batch = fact_data[i:i+BATCH_SIZE]
-                    cursor.executemany("""
-                        INSERT INTO fact_deliveries (
-                            date_key, scheduled_time_key, delivered_time_key,
-                            vehicle_key, driver_key, route_key, customer_key,
-                            delivery_id, trip_id, tracking_number,
-                            package_weight_kg, distance_km, fuel_consumed_liters,
-                            delivery_time_minutes, delay_minutes, deliveries_per_hour,
-                            fuel_efficiency_km_per_liter, cost_per_delivery, revenue_per_delivery,
-                            is_on_time, is_damaged, has_signature, delivery_status,
-                            etl_batch_id
-                        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    """, batch)
-                    
-                    # Log cada 10 batches para saber el progreso
-                    if (i // BATCH_SIZE) % 10 == 0:
-                        logging.info(f"  Progreso: batch {i//BATCH_SIZE + 1}/{total_batches}")
+            # ============================================
+            # INSERTAR POR LOTES (SIN usar mogrify)
+            # ============================================
+            BATCH_SIZE = 1000
+            total = len(fact_data)
+            
+            for i in range(0, total, BATCH_SIZE):
+                batch = fact_data[i:i+BATCH_SIZE]
+                
+                # Snowflake executemany SÍ funciona
+                cursor.executemany("""
+                    INSERT INTO fact_deliveries (
+                        date_key, scheduled_time_key, delivered_time_key,
+                        vehicle_key, driver_key, route_key, customer_key,
+                        delivery_id, trip_id, tracking_number,
+                        package_weight_kg, distance_km, fuel_consumed_liters,
+                        delivery_time_minutes, delay_minutes, deliveries_per_hour,
+                        fuel_efficiency_km_per_liter, cost_per_delivery, revenue_per_delivery,
+                        is_on_time, is_damaged, has_signature, delivery_status,
+                        etl_batch_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, batch)
+                
+                if i % 10000 == 0:
+                    logging.info(f"  Progreso: {i}/{total} registros")
             
             self.sf_conn.commit()
-            self.metrics['records_loaded'] = len(fact_data)
-            logging.info(f" Cargados {len(fact_data)} registros en fact_deliveries")
+            self.metrics['records_loaded'] = total
+            logging.info(f" Cargados {total} registros en fact_deliveries")
             
         except Exception as e:
             logging.error(f" Error cargando hechos: {e}")
@@ -438,21 +432,21 @@ class FleetLogixETL:
                     COUNT(*) * 1.0 / NULLIF(COUNT(DISTINCT vehicle_key), 0) AS deliveries_per_vehicle,
                     COUNT(*) * 1.0 / NULLIF(COUNT(DISTINCT driver_key), 0) AS avg_deliveries_per_driver,
                     (SELECT driver_key FROM fact_deliveries 
-                    WHERE date_key = (SELECT MAX(date_key) FROM dim_date WHERE full_date = CURRENT_DATE() - 1)
+                    WHERE date_key = (SELECT MAX(date_key) FROM DIM_DATE WHERE full_date = CURRENT_DATE() - 1)
                     GROUP BY driver_key ORDER BY COUNT(*) DESC LIMIT 1) AS top_driver_id,
                     (SELECT MAX(cnt) FROM (
                         SELECT COUNT(*) AS cnt
                         FROM fact_deliveries 
-                        WHERE date_key = (SELECT MAX(date_key) FROM dim_date WHERE full_date = CURRENT_DATE() - 1)
+                        WHERE date_key = (SELECT MAX(date_key) FROM DIM_DATE WHERE full_date = CURRENT_DATE() - 1)
                         GROUP BY driver_key
                     )) AS top_driver_deliveries,
                     (SELECT route_key FROM fact_deliveries 
-                    WHERE date_key = (SELECT MAX(date_key) FROM dim_date WHERE full_date = CURRENT_DATE() - 1)
+                    WHERE date_key = (SELECT MAX(date_key) FROM DIM_DATE WHERE full_date = CURRENT_DATE() - 1)
                     GROUP BY route_key ORDER BY COUNT(*) DESC LIMIT 1) AS busiest_route_id,
                     (SELECT MAX(cnt) FROM (
                         SELECT COUNT(*) AS cnt
                         FROM fact_deliveries 
-                        WHERE date_key = (SELECT MAX(date_key) FROM dim_date WHERE full_date = CURRENT_DATE() - 1)
+                        WHERE date_key = (SELECT MAX(date_key) FROM DIM_DATE WHERE full_date = CURRENT_DATE() - 1)
                         GROUP BY route_key
                     )) AS busiest_route_deliveries,
                     COUNT(DISTINCT customer_key) AS unique_customers,
@@ -462,7 +456,7 @@ class FleetLogixETL:
                         *,
                         COUNT(*) OVER (PARTITION BY customer_key) AS delivery_count
                     FROM fact_deliveries
-                    WHERE date_key = (SELECT MAX(date_key) FROM dim_date WHERE full_date = CURRENT_DATE() - 1)
+                    WHERE date_key = (SELECT MAX(date_key) FROM DIM_DATE WHERE full_date = CURRENT_DATE() - 1)
                 )
                 GROUP BY date_key
             """, (self.batch_id,))
