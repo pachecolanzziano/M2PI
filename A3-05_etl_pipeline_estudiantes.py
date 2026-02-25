@@ -28,7 +28,6 @@ logging.basicConfig(
 )
 
 # Configuración de conexiones
-<<<<<<< HEAD
 
 load_dotenv()
 POSTGRES_CONFIG = {
@@ -37,23 +36,15 @@ POSTGRES_CONFIG = {
     'user': os.getenv('DB_USER'),
     'password': os.getenv('DB_PASSWORD'),
     'port': os.getenv('DB_PORT')
-=======
-POSTGRES_CONFIG = {
-    'host': 'localhost',
-    'database': 'fleetlogix',
-    'user': 'postgres',
-    'password': 'your_password',
-    'port': 5432
->>>>>>> parent of dcc33e5 (A3 -  Se configuro los datos de conexiones de PostgreSQL Y Snowflake)
 }
 
 SNOWFLAKE_CONFIG = {
-    'user': 'LUISPACHECO90',
-    'password': 'your_password',
-    'account': 'your_account',
-    'warehouse': 'FLEETLOGIX_WH',
-    'database': 'FLEETLOGIX_DW',
-    'schema': 'ANALYTICS'
+    'user': os.getenv('SNOWFLAKE_USER'),
+    'password': os.getenv('SNOWFLAKE_PASSWORD'),
+    'account': os.getenv('SNOWFLAKE_ACCOUNT'),
+    'warehouse': os.getenv('SNOWFLAKE_WAREHOUSE'),
+    'database': os.getenv('SNOWFLAKE_DATABASE'),
+    'schema': os.getenv('SNOWFLAKE_SCHEMA')
 }
 
 class FleetLogixETL:
