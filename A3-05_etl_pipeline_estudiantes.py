@@ -89,7 +89,22 @@ class FleetLogixETL:
         logging.info(" Iniciando extracción de datos...")
         
         query = """
-        #TO DO#
+        SELECT 
+            d.delivery_id, d.tracking_number, d.customer_name, d.delivery_address, 
+            d.package_weight_kg, d.scheduled_datetime, d.delivered_datetime, d.delivery_status,
+            d.recipient_signature,
+            t.trip_id, t.departure_datetime, t.arrival_datetime, t.fuel_consumed_liters, 
+            t.total_weight_kg AS trip_total_weight,
+            v.vehicle_id, v.license_plate, v.vehicle_type, v.capacity_kg, v.fuel_type,
+            dr.driver_id, dr.first_name || ' ' || dr.last_name AS full_name, dr.employee_code,
+            r.route_id, r.route_code, r.origin_city, r.destination_city, r.distance_km, r.toll_cost
+        FROM deliveries d
+        JOIN trips t ON d.trip_id = t.trip_id
+        JOIN vehicles v ON t.vehicle_id = v.vehicle_id
+        JOIN drivers dr ON t.driver_id = dr.driver_id
+        JOIN routes r ON t.route_id = r.route_id
+        -- Filtro para captura incremental (ajustable según necesidad)
+        WHERE d.scheduled_datetime >= CURRENT_DATE - INTERVAL '3 days'
         """
         
         try:
@@ -155,7 +170,7 @@ class FleetLogixETL:
             
             # Manejar cambios históricos (SCD Type 2 para conductor/vehículo)
             df['valid_from'] = pd.to_datetime(df['scheduled_datetime']).dt.date
-            df['valid_to'] = pd.to_datetime('9999-12-31')
+            df['valid_to'] = None
             df['is_current'] = True
             
             self.metrics['records_transformed'] = len(df)
@@ -314,12 +329,27 @@ class FleetLogixETL:
         try:
             # Crear tabla de totales si no existe
             cursor.execute("""
-                #TO DO#
+                CREATE TABLE IF NOT EXISTS daily_performance_summary (
+                    batch_id INT,
+                    report_date DATE DEFAULT CURRENT_DATE(),
+                    total_deliveries INT,
+                    avg_delay_minutes DECIMAL(10,2),
+                    total_revenue DECIMAL(15,2),
+                    fuel_efficiency_avg DECIMAL(10,2)
+                )
             """)
             
             # Insertar totales del día
             cursor.execute("""
-                #TO DO#
+                INSERT INTO daily_performance_summary (batch_id, total_deliveries, avg_delay_minutes, total_revenue, fuel_efficiency_avg)
+                SELECT 
+                    %s, 
+                    COUNT(delivery_id), 
+                    AVG(delay_minutes), 
+                    SUM(revenue_per_delivery), 
+                    AVG(fuel_efficiency_km_per_liter)
+                FROM fact_deliveries
+                WHERE etl_batch_id = %s
             """, (self.batch_id,))
             
             self.sf_conn.commit()

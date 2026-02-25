@@ -173,7 +173,7 @@ openssl rsa -in snowflake_key.pem -pubout -out snowflake_key.pub
 --Convertir la llave PEM a DER 
 openssl pkcs8 -topk8 -inform PEM -outform DER -in snowflake_key.pem -out snowflake_key.der -nocrypt
 
-Verificar que se creó
+--Verificar que se creó
 ls -la snowflake_key.der
 
 -- sql - Actualizar Snowflake con la llave pública
