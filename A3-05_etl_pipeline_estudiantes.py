@@ -14,6 +14,8 @@ import schedule
 import time
 import json
 from typing import Dict, List, Tuple
+import os
+from dotenv import load_dotenv
 
 # Configuración de logging
 logging.basicConfig(
