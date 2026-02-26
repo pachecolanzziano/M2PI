@@ -1,17 +1,8 @@
 # 🚀 Módulo 2 - Proyecto Integrador - Avance 2
 ### 👨‍💻 Presentado por:
 ## Luis Carlos Pacheco Lanzziano  
-> Proyecto desarrollado como parte del Módulo 2 del programa de Ciencia de Datos, aplicando análisis, modelado y documentación técnica.
-# Contenido
 
-- [1 Analisis del modelo proporcionado](#1-analisis-del-modelo-proporcionado)
-    - [1.1 Analisis del modelo proporcionado](#11-Analisis-del-modelo-proporcionado)
-    - [1.2 Patrones de negocio implícitos](#12-patrones-de-negocio-implícitos)
-    - [1.3 Diagrama entidad relacion](#13-diagrama-entidad-relacion)
-    - [1.4 Posibles mejoras sin modificar la estructura base](#14-posibles-mejoras-sin-modificar-la-estructura-base)
-
----
-## Queries Básicas
+## Queryes Básicas
 ### 1. Contar vehículos por tipo - Execution Time: 0.072 ms
 `SELECT vehicle_type, COUNT(*) 
 FROM vehicles 
@@ -206,4 +197,17 @@ Contexto de negocio: Existe una concentración crítica de entregas en la franja
 ![alt text](image-11.png)
 
 
-falta los indices y detalles
+### ÍNDICES
+![alt text](image-12.png) 
+
+ANALYZE vehicles; - Execute time 0,011s
+
+ANALYZE drivers; - Execute time	0,006s
+
+ANALYZE routes; - Execute time 0,005s  
+
+ANALYZE trips; - Execute time 0,074s
+
+ANALYZE deliveries; - Execute time	0,385s
+
+ANALYZE maintenance; - Execute time	0,038s

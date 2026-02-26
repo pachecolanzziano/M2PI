@@ -11,6 +11,12 @@
     - [1.4 Posibles mejoras sin modificar la estructura base](#14-posibles-mejoras-sin-modificar-la-estructura-base)
 
 ---
+Se implemento un contenedor de docker con PostgreSql para la conexion a la base de datos 
+![alt text](image-16.png)
+
+y DBeaver como gestor de administracion de la base de datos
+![alt text](image-17.png)
+
 ## 1 Analisis del modelo proporcionado
 | TABLA       | PROPÓSITO                         | ANALOGÍA MUNDO REAL              |
 |-------------|----------------------------------|-----------------------------------|
