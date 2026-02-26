@@ -16,6 +16,8 @@ import json
 from typing import Dict, List, Tuple
 import os
 from dotenv import load_dotenv
+from snowflake.connector.pandas_tools import write_pandas
+
 
 # Configuración de logging
 logging.basicConfig(
@@ -85,309 +87,152 @@ class FleetLogixETL:
             return False
     
     def extract_daily_data(self) -> pd.DataFrame:
-        """Extraer datos del día anterior de PostgreSQL"""
-        logging.info(" Iniciando extracción de datos...")
-        
+        logging.info(" Extrayendo datos de PostgreSQL...")
         query = """
         SELECT 
             d.delivery_id, d.tracking_number, d.customer_name, d.delivery_address, 
             d.package_weight_kg, d.scheduled_datetime, d.delivered_datetime, d.delivery_status,
-            d.recipient_signature,
-            t.trip_id, t.departure_datetime, t.arrival_datetime, t.fuel_consumed_liters, 
-            t.total_weight_kg AS trip_total_weight,
+            t.trip_id, t.fuel_consumed_liters, t.departure_datetime, t.arrival_datetime,
             v.vehicle_id, v.license_plate, v.vehicle_type, v.capacity_kg, v.fuel_type,
-            dr.driver_id, dr.first_name || ' ' || dr.last_name AS full_name, dr.employee_code,
+            dr.driver_id, dr.employee_code, (dr.first_name || ' ' || dr.last_name) AS full_name,
             r.route_id, r.route_code, r.origin_city, r.destination_city, r.distance_km, r.toll_cost
-        FROM deliveries d
-        JOIN trips t ON d.trip_id = t.trip_id
-        JOIN vehicles v ON t.vehicle_id = v.vehicle_id
-        JOIN drivers dr ON t.driver_id = dr.driver_id
-        JOIN routes r ON t.route_id = r.route_id
-        -- Filtro para captura incremental (ajustable según necesidad)
-        WHERE d.scheduled_datetime >= CURRENT_DATE - INTERVAL '3 days'
+        FROM public.deliveries d
+        JOIN public.trips t ON d.trip_id = t.trip_id
+        JOIN public.vehicles v ON t.vehicle_id = v.vehicle_id
+        JOIN public.drivers dr ON t.driver_id = dr.driver_id
+        JOIN public.routes r ON t.route_id = r.route_id;
         """
-        
-        try:
-            df = pd.read_sql(query, self.pg_conn)
-            self.metrics['records_extracted'] = len(df)
-            logging.info(f" Extraídos {len(df)} registros")
-            return df
-        except Exception as e:
-            logging.error(f" Error en extracción: {e}")
-            self.metrics['errors'] += 1
-            return pd.DataFrame()
-    
+        df = pd.read_sql(query, self.pg_conn)
+        self.metrics['records_extracted'] = len(df)
+        return df
+
     def transform_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Transformar datos para el modelo dimensional"""
-        logging.info(" Iniciando transformación de datos...")
+        logging.info(" Transformando datos (Pandas Vectorized)...")
+        # Convertir fechas de golpe
+        for col in ['scheduled_datetime', 'delivered_datetime', 'departure_datetime', 'arrival_datetime']:
+            df[col] = pd.to_datetime(df[col], errors='coerce')
+
+        # Cálculos masivos
+        df['delivery_time_minutes'] = ((df['delivered_datetime'] - df['scheduled_datetime']).dt.total_seconds() / 60).round(2)
+        df['delay_minutes'] = df['delivery_time_minutes'].clip(lower=0).fillna(0)
+        df['is_on_time'] = df['delay_minutes'] <= 30
         
-        try:
-            # Calcular métricas
-            df['delivery_time_minutes'] = (
-                (pd.to_datetime(df['delivered_datetime']) - 
-                 pd.to_datetime(df['scheduled_datetime'])).dt.total_seconds() / 60
-            ).round(2)
-            
-            df['delay_minutes'] = df['delivery_time_minutes'].apply(
-                lambda x: max(0, x) if x > 0 else 0
-            )
-            
-            df['is_on_time'] = df['delay_minutes'] <= 30
-            
-            # Calcular entregas por hora
-            df['trip_duration_hours'] = (
-                (pd.to_datetime(df['arrival_datetime']) - 
-                 pd.to_datetime(df['departure_datetime'])).dt.total_seconds() / 3600
-            ).round(2)
-            
-            # Agrupar entregas por trip para calcular entregas/hora
-            deliveries_per_trip = df.groupby('trip_id').size()
-            df['deliveries_in_trip'] = df['trip_id'].map(deliveries_per_trip)
-            df['deliveries_per_hour'] = (
-                df['deliveries_in_trip'] / df['trip_duration_hours']
-            ).round(2)
-            
-            # Eficiencia de combustible
-            df['fuel_efficiency_km_per_liter'] = (
-                df['distance_km'] / df['fuel_consumed_liters']
-            ).round(2)
-            
-            # Costo estimado por entrega
-            df['cost_per_delivery'] = (
-                (df['fuel_consumed_liters'] * 5000 + df['toll_cost']) / 
-                df['deliveries_in_trip']
-            ).round(2)
-            
-            # Revenue estimado (ejemplo: $20,000 base + $500 por kg)
-            df['revenue_per_delivery'] = (20000 + df['package_weight_kg'] * 500).round(2)
-            
-            # Validaciones de calidad
-            # No permitir tiempos negativos
-            df = df[df['delivery_time_minutes'] >= 0]
-            
-            # No permitir pesos fuera de rango
-            df = df[(df['package_weight_kg'] > 0) & (df['package_weight_kg'] < 10000)]
-            
-            # Manejar cambios históricos (SCD Type 2 para conductor/vehículo)
-            df['valid_from'] = pd.to_datetime(df['scheduled_datetime']).dt.date
-            df['valid_to'] = None
-            df['is_current'] = True
-            
-            self.metrics['records_transformed'] = len(df)
-            logging.info(f" Transformados {len(df)} registros")
-            
-            return df
-            
-        except Exception as e:
-            logging.error(f" Error en transformación: {e}")
-            self.metrics['errors'] += 1
-            return pd.DataFrame()
-    
+        df['trip_duration_hours'] = ((df['arrival_datetime'] - df['departure_datetime']).dt.total_seconds() / 3600).round(2)
+        df.loc[df['trip_duration_hours'] <= 0, 'trip_duration_hours'] = np.nan
+
+        # Entregas por hora
+        deliveries_per_trip = df.groupby('trip_id').size()
+        df['deliveries_in_trip'] = df['trip_id'].map(deliveries_per_trip)
+        df['deliveries_per_hour'] = (df['deliveries_in_trip'] / df['trip_duration_hours']).fillna(0).round(2)
+        
+        # Eficiencia y Costos
+        df['fuel_efficiency_km_per_liter'] = (df['distance_km'] / df['fuel_consumed_liters']).replace([np.inf, -np.inf], 0).fillna(0).round(2)
+        df['cost_per_delivery'] = ((df['fuel_consumed_liters'].fillna(0) * 5000 + df['toll_cost'].fillna(0)) / df['deliveries_in_trip']).round(2)
+        df['revenue_per_delivery'] = (20000 + df['package_weight_kg'] * 500).round(2)
+
+        # Filtros de calidad
+        df = df[(df['package_weight_kg'] > 0) & (df['package_weight_kg'] < 10000)].copy()
+        
+        # Keys para Snowflake
+        df['date_key'] = df['scheduled_datetime'].dt.strftime('%Y%m%d').fillna(0).astype(int)
+        df['scheduled_time_key'] = (df['scheduled_datetime'].dt.hour * 10000 + df['scheduled_datetime'].dt.minute * 100).fillna(0).astype(int)
+        
+        self.metrics['records_transformed'] = len(df)
+        return df
+
     def load_dimensions(self, df: pd.DataFrame):
-        """Cargar o actualizar dimensiones en Snowflake"""
-        logging.info(" Cargando dimensiones...")
-        
+        logging.info(" Sincronizando dimensiones (Bulk Write + Merge)...")
         cursor = self.sf_conn.cursor()
-        
-        try:
-            # Cargar dim_customer (nuevos clientes)
-            customers = df[['customer_name']].drop_duplicates()
-            for _, row in customers.iterrows():
-                cursor.execute("""
-                    MERGE INTO dim_customer c
-                    USING (SELECT %s as customer_name) s
-                    ON c.customer_name = s.customer_name
-                    WHEN NOT MATCHED THEN
-                        INSERT (customer_name, customer_type, city, first_delivery_date, 
-                               total_deliveries, customer_category)
-                        VALUES (%s, 'Individual', %s, CURRENT_DATE(), 0, 'Regular')
-                """, (row['customer_name'], row['customer_name'], 
-                     df[df['customer_name'] == row['customer_name']]['destination_city'].iloc[0]))
-            
-            # Actualizar dimensiones SCD Type 2 si hay cambios
-            # (Ejemplo simplificado para dim_driver)
-            cursor.execute("""
-                UPDATE dim_driver 
-                SET valid_to = CURRENT_DATE() - 1, is_current = FALSE
-                WHERE driver_id IN (
-                    SELECT DISTINCT driver_id 
-                    FROM staging_daily_load
-                ) AND is_current = TRUE
-            """)
-            
-            self.sf_conn.commit()
-            logging.info(" Dimensiones actualizadas")
-            
-        except Exception as e:
-            logging.error(f" Error cargando dimensiones: {e}")
-            self.sf_conn.rollback()
-            self.metrics['errors'] += 1
-    
+
+        # --- CLIENTES ---
+        cust_df = df[['customer_name', 'destination_city']].drop_duplicates().copy()
+        cust_df.columns = ['CUSTOMER_NAME', 'CITY']
+        cust_df['CUSTOMER_TYPE'] = 'Individual'
+        cust_df['FIRST_DELIVERY_DATE'] = datetime.now().date()
+        cust_df['TOTAL_DELIVERIES'] = 1
+        cust_df['CUSTOMER_CATEGORY'] = 'Regular'
+
+        write_pandas(self.sf_conn, cust_df, "STG_CUSTOMERS", auto_create_table=True, table_type="temp")
+        cursor.execute("""
+            MERGE INTO dim_customer c USING STG_CUSTOMERS s ON c.customer_name = s.CUSTOMER_NAME
+            WHEN NOT MATCHED THEN INSERT (customer_key, customer_name, customer_type, city, first_delivery_date, total_deliveries, customer_category)
+            VALUES (seq_customer_key.NEXTVAL, s.CUSTOMER_NAME, s.CUSTOMER_TYPE, s.CITY, s.FIRST_DELIVERY_DATE, s.TOTAL_DELIVERIES, s.CUSTOMER_CATEGORY);
+        """)
+
+        # --- VEHÍCULOS ---
+        v_df = df[['vehicle_id', 'license_plate', 'vehicle_type', 'capacity_kg', 'fuel_type']].drop_duplicates().copy()
+        v_df.columns = [c.upper() for c in v_df.columns]
+        write_pandas(self.sf_conn, v_df, "STG_VEHICLES", auto_create_table=True, table_type="temp")
+        cursor.execute("""
+            MERGE INTO dim_vehicle v USING STG_VEHICLES s ON v.license_plate = s.LICENSE_PLATE
+            WHEN NOT MATCHED THEN INSERT (vehicle_key, vehicle_id, license_plate, vehicle_type, capacity_kg, fuel_type, status, is_current, valid_from)
+            VALUES (seq_vehicle_key.NEXTVAL, s.VEHICLE_ID, s.LICENSE_PLATE, s.VEHICLE_TYPE, s.CAPACITY_KG, s.FUEL_TYPE, 'active', TRUE, CURRENT_DATE());
+        """)
+        self.sf_conn.commit()
+
     def load_facts(self, df: pd.DataFrame):
-        """Cargar hechos en Snowflake"""
-        logging.info(" Cargando tabla de hechos...")
-        
+        logging.info(f" Cargando {len(df)} hechos por lotes...")
         cursor = self.sf_conn.cursor()
         
-        try:
-            # Preparar datos para inserción
-            fact_data = []
-            for _, row in df.iterrows():
-                # Obtener keys de dimensiones
-                date_key = int(pd.to_datetime(row['scheduled_datetime']).strftime('%Y%m%d'))
-                scheduled_time_key = pd.to_datetime(row['scheduled_datetime']).hour * 100
-                delivered_time_key = pd.to_datetime(row['delivered_datetime']).hour * 100
-                
-                fact_data.append((
-                    date_key,
-                    scheduled_time_key,
-                    delivered_time_key,
-                    row['vehicle_id'],  # Simplificado, debería buscar vehicle_key
-                    row['driver_id'],   # Simplificado, debería buscar driver_key
-                    row['route_id'],    # Simplificado, debería buscar route_key
-                    1,  # customer_key placeholder
-                    row['delivery_id'],
-                    row['trip_id'],
-                    row['tracking_number'],
-                    row['package_weight_kg'],
-                    row['distance_km'],
-                    row['fuel_consumed_liters'],
-                    row['delivery_time_minutes'],
-                    row['delay_minutes'],
-                    row['deliveries_per_hour'],
-                    row['fuel_efficiency_km_per_liter'],
-                    row['cost_per_delivery'],
-                    row['revenue_per_delivery'],
-                    row['is_on_time'],
-                    False,  # is_damaged
-                    row['recipient_signature'],
-                    row['delivery_status'],
-                    self.batch_id
-                ))
-            
-            # Insertar en batch
-            cursor.executemany("""
-                INSERT INTO fact_deliveries (
-                    date_key, scheduled_time_key, delivered_time_key,
-                    vehicle_key, driver_key, route_key, customer_key,
-                    delivery_id, trip_id, tracking_number,
-                    package_weight_kg, distance_km, fuel_consumed_liters,
-                    delivery_time_minutes, delay_minutes, deliveries_per_hour,
-                    fuel_efficiency_km_per_liter, cost_per_delivery, revenue_per_delivery,
-                    is_on_time, is_damaged, has_signature, delivery_status,
-                    etl_batch_id
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            """, fact_data)
-            
-            self.sf_conn.commit()
-            self.metrics['records_loaded'] = len(fact_data)
-            logging.info(f" Cargados {len(fact_data)} registros en fact_deliveries")
-            
-        except Exception as e:
-            logging.error(f" Error cargando hechos: {e}")
-            self.sf_conn.rollback()
-            self.metrics['errors'] += 1
-    
-    def run_etl(self):
-        """Ejecutar pipeline ETL completo"""
-        start_time = datetime.now()
-        logging.info(f" Iniciando ETL - Batch ID: {self.batch_id}")
+        # Mapeos rápidos
+        cursor.execute("SELECT customer_name, customer_key FROM dim_customer")
+        c_map = dict(cursor.fetchall())
+        cursor.execute("SELECT driver_id, driver_key FROM dim_driver WHERE is_current=True")
+        d_map = dict(cursor.fetchall())
+        cursor.execute("SELECT vehicle_id, vehicle_key FROM dim_vehicle WHERE is_current=True")
+        v_map = dict(cursor.fetchall())
+
+        fact_data = []
+        for r in df.to_dict('records'):
+            fact_data.append((
+                r['date_key'], r['scheduled_time_key'], 
+                v_map.get(r['vehicle_id'], 1), d_map.get(r['driver_id'], 1), 
+                1, c_map.get(r['customer_name'], 1),
+                r['delivery_id'], r['trip_id'], r['tracking_number'],
+                r['package_weight_kg'], r['distance_km'], r['fuel_consumed_liters'],
+                r['delivery_time_minutes'], r['delay_minutes'],
+                r['deliveries_per_hour'], r['fuel_efficiency_km_per_liter'],
+                r['cost_per_delivery'], r['revenue_per_delivery'],
+                int(r['is_on_time']), r['delivery_status'], self.batch_id
+            ))
+
+        # Asegúrate de que el SQL en load_facts tenga exactamente este orden de columnas:
+        sql = """INSERT INTO fact_deliveries (
+                    date_key, scheduled_time_key, vehicle_key, driver_key, route_key, customer_key, 
+                    delivery_id, trip_id, tracking_number, package_weight_kg, distance_km, fuel_consumed_liters, 
+                    delivery_time_minutes, delay_minutes, deliveries_per_hour, fuel_efficiency_km_per_liter, 
+                    cost_per_delivery, revenue_per_delivery, is_on_time, delivery_status, etl_batch_id
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
+
+        chunk_size = 15000
+        for i in range(0, len(fact_data), chunk_size):
+            cursor.executemany(sql, fact_data[i:i+chunk_size])
+            logging.info(f" -> Lote OK: {i+len(fact_data[i:i+chunk_size])}/{len(fact_data)}")
         
-        try:
-            # Conectar
-            if not self.connect_databases():
-                return
-            
-            # ETL
-            df = self.extract_daily_data()
-            if not df.empty:
-                df_transformed = self.transform_data(df)
-                if not df_transformed.empty:
-                    self.load_dimensions(df_transformed)
-                    self.load_facts(df_transformed)
-            
-            # Calcular totales para reportes
-            self._calculate_daily_totals()
-            
-            # Cerrar conexiones
-            self.close_connections()
-            
-            # Log final
-            duration = (datetime.now() - start_time).total_seconds()
-            logging.info(f" ETL completado en {duration:.2f} segundos")
-            logging.info(f" Métricas: {json.dumps(self.metrics, indent=2)}")
-            
-        except Exception as e:
-            logging.error(f" Error fatal en ETL: {e}")
-            self.metrics['errors'] += 1
-            self.close_connections()
-    
+        self.sf_conn.commit()
+        self.metrics['records_loaded'] = len(fact_data)
+
     def _calculate_daily_totals(self):
-        """Pre-calcular totales para reportes rápidos"""
         cursor = self.sf_conn.cursor()
-        
-        try:
-            # Crear tabla de totales si no existe
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS daily_performance_summary (
-                    batch_id INT,
-                    report_date DATE DEFAULT CURRENT_DATE(),
-                    total_deliveries INT,
-                    avg_delay_minutes DECIMAL(10,2),
-                    total_revenue DECIMAL(15,2),
-                    fuel_efficiency_avg DECIMAL(10,2)
-                )
-            """)
-            
-            # Insertar totales del día
-            cursor.execute("""
-                INSERT INTO daily_performance_summary (batch_id, total_deliveries, avg_delay_minutes, total_revenue, fuel_efficiency_avg)
-                SELECT 
-                    %s, 
-                    COUNT(delivery_id), 
-                    AVG(delay_minutes), 
-                    SUM(revenue_per_delivery), 
-                    AVG(fuel_efficiency_km_per_liter)
-                FROM fact_deliveries
-                WHERE etl_batch_id = %s
-            """, (self.batch_id,))
-            
-            self.sf_conn.commit()
-            logging.info(" Totales diarios calculados")
-            
-        except Exception as e:
-            logging.error(f" Error calculando totales: {e}")
-    
-    def close_connections(self):
-        """Cerrar conexiones a bases de datos"""
-        if self.pg_conn:
-            self.pg_conn.close()
-        if self.sf_conn:
-            self.sf_conn.close()
-        logging.info(" Conexiones cerradas")
+        cursor.execute("""
+            INSERT INTO daily_performance_summary (batch_id, total_deliveries, avg_delay_minutes, total_revenue, fuel_efficiency_avg)
+            SELECT %s, COUNT(*), AVG(delay_minutes), SUM(revenue_per_delivery), AVG(fuel_efficiency_km_per_liter)
+            FROM fact_deliveries WHERE etl_batch_id = %s
+        """, (self.batch_id, self.batch_id))
+        self.sf_conn.commit()
 
-def job():
-    """Función para programar con schedule"""
-    etl = FleetLogixETL()
-    etl.run_etl()
-
-def main():
-    """Función principal - Automatización diaria"""
-    logging.info(" Pipeline ETL FleetLogix iniciado")
-    
-    # Programar ejecución diaria a las 2:00 AM
-    schedule.every().day.at("02:00").do(job)
-    
-    logging.info(" ETL programado para ejecutarse diariamente a las 2:00 AM")
-    logging.info("Presiona Ctrl+C para detener")
-    
-    # Ejecutar una vez al inicio (para pruebas)
-    job()
-    
-    # Loop infinito esperando la hora programada
-    while True:
-        schedule.run_pending()
-        time.sleep(60)  # Verificar cada minuto
+    def run_etl(self):
+        if not self.connect_databases(): return
+        df = self.extract_daily_data()
+        if not df.empty:
+            df = self.transform_data(df)
+            self.load_dimensions(df)
+            self.load_facts(df)
+            self._calculate_daily_totals()
+        logging.info(f" ETL Finalizado. Métricas: {self.metrics}")
+        self.pg_conn.close()
+        self.sf_conn.close()
 
 if __name__ == "__main__":
-    main()
+    etl = FleetLogixETL()
+    etl.run_etl()
