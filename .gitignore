@@ -199,4 +199,11 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
+# Snowflake keys
+*.der
+*.pem
+*.pub
+*.key
+snowflake_key
+snowflake_key.*
 # End of https://www.toptal.com/developers/gitignore/api/python,windows
